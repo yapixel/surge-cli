@@ -1,0 +1,64 @@
+#!/bin/sh
+# Surge CLI dispatcher: run the native surge-cli when available, otherwise the
+# bundled pure-Python Controller client (scripts/surge_cli.py).
+#
+#   SURGE_CLI_BACKEND=auto (default) | native | python
+#   surge-cli --which-backend   print the resolved backend path and exit
+set -eu
+
+NATIVE_APP=/Applications/Surge.app/Contents/Applications/surge-cli
+
+# Resolve symlinks so the Python client is found next to the real script.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname -- "$self")/$link ;;
+  esac
+done
+DIR=$(CDPATH='' cd -- "$(dirname -- "$self")" && pwd)
+
+find_native() {
+  # A copy of this dispatcher on PATH must not be mistaken for the binary.
+  if [ -z "${SURGE_CLI_DISPATCHING:-}" ]; then
+    set -f; old_ifs=$IFS; IFS=:
+    for d in $PATH; do
+      c="$d/surge-cli"
+      if [ -x "$c" ] && [ ! "$c" -ef "$self" ]; then
+        IFS=$old_ifs; set +f; printf '%s\n' "$c"; return 0
+      fi
+    done
+    IFS=$old_ifs; set +f
+  fi
+  [ -x "$NATIVE_APP" ] && { printf '%s\n' "$NATIVE_APP"; return 0; }
+  return 1
+}
+
+python_backend() {
+  command -v python3 >/dev/null 2>&1 || { echo "surge-cli: python3 not found" >&2; exit 127; }
+  printf '%s\n' "$DIR/surge_cli.py"
+}
+
+# The native client cannot parse retrieve-data's binary reply; prefer Python for it.
+python_only=
+for a in "$@"; do [ "$a" = retrieve-data ] && python_only=1 && break; done
+
+case ${SURGE_CLI_BACKEND:-auto} in
+  native) bin=$(find_native) || { echo "surge-cli: native binary not found" >&2; exit 127; } ;;
+  python) bin=$(python_backend) ;;
+  auto)   if [ -n "$python_only" ]; then bin=$(python_backend)
+          else bin=$(find_native) || bin=$(python_backend); fi ;;
+  *) echo "surge-cli: SURGE_CLI_BACKEND must be auto, native or python" >&2; exit 2 ;;
+esac
+
+if [ "${1:-}" = "--which-backend" ]; then
+  case $bin in *.py) echo "python $bin" ;; *) echo "native $bin" ;; esac
+  exit 0
+fi
+
+export SURGE_CLI_DISPATCHING=1
+case $bin in
+  *.py) exec python3 -I "$bin" "$@" ;;
+  *) exec "$bin" "$@" ;;
+esac
